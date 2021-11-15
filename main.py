@@ -1,6 +1,6 @@
-from bs4.element import Script
 from gevent import monkey as curious_george
 curious_george.patch_all(thread=False, select=False)
+from gspread.models import Worksheet
 import time
 from random import randrange
 import grequests
@@ -8,8 +8,12 @@ import gspread
 import json
 from bs4 import BeautifulSoup
 from pprint import pprint 
+from selenium import webdriver
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.options import Options
+from datetime import datetime
+from creds import API_KEY
 
-API_KEY = "c5eba080e8777f7afd5d623dd237d8e501a456f8"
 gc = gspread.service_account("key.json")
 sh = gc.open("Copy of v.03 stock monitoring dashboard")
 
@@ -31,14 +35,14 @@ def get_jsons(urls, headers = {"User-Agent": "PostmanRuntime/7.26.8"}):
               for u in urls[x:x+MAX_CONNECTIONS])
         response = grequests.map(rs)
         if response[0].status_code >= 300 and response[1].status_code >= 300:
-            print(response[0].status_code, response[1].status_code)
-            time.sleep(180)
+            # print(response[0].status_code, response[1].status_code)
+            #time.sleep(5)
             rs = (grequests.get(u, stream=False, headers = {"User-Agent": "PostmanRuntime/7.26.8"})
               for u in urls[x:x+MAX_CONNECTIONS])
             response = grequests.map(rs)
         requests.extend(response)
-        print("json")
-        print(response)
+        # print("json")
+        # print(response)
     responses = []
     for request in requests:
         try:
@@ -57,14 +61,14 @@ def get_soups(urls):
               for u in urls[x:x+MAX_CONNECTIONS])
         response = grequests.map(rs)
         if response[0].status_code >= 300 and response[1].status_code >= 300:
-            print(response[0].status_code, response[1].status_code)
-            time.sleep(180)
+            # print(response[0].status_code, response[1].status_code)
+            time.sleep(100)
             rs = (grequests.get(u, stream=False, headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36"})
               for u in urls[x:x+MAX_CONNECTIONS])
             response = grequests.map(rs)
         requests.extend(response)
-        print("soup")
-        print(response)
+        # print("soup")
+        # print(response)
     soups = []
     for request in requests:
         try:
@@ -76,7 +80,12 @@ def get_soups(urls):
             pass
     return soups
 
-
+def get_tickers_done():
+    worksheet = sh.get_worksheet(0)
+    tickers = worksheet.col_values(1)
+    if len(tickers)>1:
+        return set(tickers[1:])
+    return set()
 
 
 def get_companies():
@@ -94,20 +103,69 @@ def get_all_tickers():
         json.dump(data, f)
 
 
+def get_insider_json():
+    global sh
+    worksheet = sh.get_worksheet(1)
+    tickers = worksheet.col_values(4)[1:]
+    tickers_date = worksheet.col_values(3)[1:]
+    tickers_type = worksheet.col_values(7)[1:]
+    prices = worksheet.col_values(12)[1:]
+    today = datetime.today()
+    
+    data = {}
 
-def get_tickers_data():
+    for i in range(len(tickers)):
+        try:
+            ticker = tickers[i]
+            ticker_type = tickers_type[i]
+            price = prices[i]
+            ticker_date = datetime.strptime(tickers_date[i], "%Y-%m-%d")
+            if ticker_type[0] != 'P':
+                continue
+            if ticker not in data.keys():
+                data[ticker] = [0, 0, 0, 0, 0, 0, 0]
+            days_delta = (today-ticker_date).days
+            
+            if days_delta < 365:
+                data[ticker][0] += 1
+                data[ticker][1] += float(price[2:].replace(",",""))
+            if days_delta < 182:
+                data[ticker][2] += 1
+                data[ticker][3] += float(price[2:].replace(",",""))
+            if days_delta < 91:
+                data[ticker][4] += float(price[2:].replace(",",""))
+            if days_delta < 30:
+                data[ticker][5] += float(price[2:].replace(",",""))
+            if days_delta < 7:
+                data[ticker][6] += float(price[2:].replace(",",""))
+        except:
+            pass
+    return data
+
+def get_tickers_data(choice):
     l = []
     with open("tickers.json") as f:
         tickers = json.load(f)
-    clean_dashboard()
+    insider_json = get_insider_json()
+    if choice == 3:
+        done = get_tickers_done()
+    elif choice == 4:
+        clean_dashboard()
+        done = set()
+    options = Options()
+    options.headless = True
+    options.add_argument('--log-level=3')
+    driver = webdriver.Chrome(options=options)
     for key in tickers.keys():
+        if key in done:
+            continue
         l.append(key)
-        if len(l) >= 100:
-            time.sleep(randrange(1, 5))
-            get_tickers_data_100(l)
+        if len(l) >= 50:
+            get_tickers_data_100(l, driver, insider_json)
             l = []
-
-def get_tickers_data_100(tickers):
+    get_tickers_data_100(l, driver, insider_json)
+        
+def get_tickers_data_100(tickers, driver, insider_json):
     data = {}
     quickfs_links = []
     yahoo_links = []
@@ -117,17 +175,20 @@ def get_tickers_data_100(tickers):
         yahoo_links.append(f"https://finance.yahoo.com/quote/{ticker}/key-statistics?p={ticker}")
 
     quickfs_response = get_jsons(quickfs_links)
-    yahoo_soups = get_soups(yahoo_links)
     i = 0
     for response in quickfs_response:
         try:
+            try:
+                gic = int(response["datasets"]["metadata"]["gics"])
+            except:
+                gic = ""
             data[tickers[i]] = {
                 "description" : response["datasets"]["metadata"]["description"],
                 "exchange": response["datasets"]["metadata"]["exchange"],
                 "sector": response["datasets"]["metadata"]["sector"],
                 "subindustry": response["datasets"]["metadata"]["subindustry"],
                 "industry": response["datasets"]["metadata"]["industry"],
-                "gics": response["datasets"]["metadata"]["gics"]
+                "gics": gic
             }
         except:
             data[tickers[i]] = {
@@ -140,20 +201,25 @@ def get_tickers_data_100(tickers):
             }
             pass
         i += 1
-
     i = 0
-    for soup in yahoo_soups:
+    for link in yahoo_links:
         try:
+            driver.get(link)
+            soup = driver.page_source
+            while soup.count("Please try reloading the page.") > 1:
+                print("sleeping")
+                time.sleep(180)
+                driver.get(link)
+                soup = driver.page_source
+            soup = BeautifulSoup(soup, "html.parser")
             yahoo_json = get_yahoo_data(soup)
             data[tickers[i]].update(yahoo_json)
         except:
-            print(tickers[i])
+            # print(tickers[i])
             pass
         i += 1
-
-    # with open("temp1.json", "w") as f:
-    #     json.dump(data, f) 
-    write_dashboard(data)
+    print("WRITING 50 TICKERS...")
+    write_dashboard(data, insider_json)
 
 def clean_dashboard():
     global sh
@@ -173,9 +239,9 @@ def clean_dashboard():
         "Industry Group",
         "Industry",
         "Sub industry",
-        "marketcap(million)",
+        "marketcap",
         "Price",
-        "Price change",
+        "Price change (%)",
         "12m Ins",
         "12m Ins Val",
         "6m Ins",
@@ -196,7 +262,7 @@ def clean_dashboard():
         "Earning Per Share",
         "PE (trailing)",
         "PE (forward)",
-        "Revenue(Million)",
+        "Revenue",
         "Price/Sales (ttm)",
         "Enterprise Value/EBITDA",
         "Price/Book (mrq)",
@@ -220,12 +286,15 @@ def clean_dashboard():
         "GIC"
     ])
 
-def write_dashboard(data):
+def write_dashboard(data, insider_json):
     global sh
     worksheet = sh.get_worksheet(0)
     rows = []
     for key, value in data.items():
         try:
+            insider_row = [0, 0, 0, 0, 0, 0, 0]
+            if key in insider_json.keys():
+                insider_row = insider_json[key]
             row = [
                 key,
                 value["exchange"],
@@ -242,14 +311,14 @@ def write_dashboard(data):
                 "",
                 value["mkt_cap"],
                 value["price"],
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
+                value["price_change"],
+                insider_row[0],
+                insider_row[1],
+                insider_row[2],
+                insider_row[3],
+                insider_row[4],
+                insider_row[5],
+                insider_row[6],
                 value["insider_own"],
                 value["institution_own"],
                 value["short"],
@@ -272,7 +341,7 @@ def write_dashboard(data):
                 "",
                 value["forward_dividend"],
                 value["trailing_dividend"],
-                value["forward_dividend"],
+                value["5Y_dividend"],
                 value["payout_ratio"],
                 value["cash"],
                 "",
@@ -291,15 +360,14 @@ def write_dashboard(data):
             pass
     worksheet.append_rows(rows)
 
-def get_yahoo_data(json_data):
-    pprint(json_data)
+def get_yahoo_data(soup):
     data = {}
     for script in soup.findAll("script"):
         if "root.App.main" in str(script):
             str_data = str(script).split("root.App.main = ")[1][:-21]
             json_data = json.loads(str_data)
-            with open("json_data.json", "w") as f:
-                json.dump(json_data, f)
+            # with open("json_data.json", "w") as f:
+            #     json.dump(json_data, f)
             
             try:
                 data["name"] = json_data["context"]["dispatcher"]["stores"]["QuoteSummaryStore"]["quoteType"]["shortName"]
@@ -310,7 +378,7 @@ def get_yahoo_data(json_data):
             except:
                 data["ticker"] = ""
             try:
-                data["mkt_cap"] = json_data["context"]["dispatcher"]["stores"]["QuoteSummaryStore"]["summaryDetail"]["marketCap"]["raw"]
+                data["mkt_cap"] = json_data["context"]["dispatcher"]["stores"]["QuoteTimeSeriesStore"]["timeSeries"]["trailingMarketCap"][-1]["reportedValue"]["raw"]
             except:
                 data["mkt_cap"] = 0
             try:
@@ -342,11 +410,11 @@ def get_yahoo_data(json_data):
             except:
                 data["earning_per_share"] = 0
             try:
-                data["trailing_pe"] = json_data["context"]["dispatcher"]["stores"]["QuoteSummaryStore"]["summaryDetail"]["trailingPE"]["raw"]
+                data["trailing_pe"] = json_data["context"]["dispatcher"]["stores"]["QuoteTimeSeriesStore"]["timeSeries"]["trailingPeRatio"][-1]["reportedValue"]["raw"]
             except:
                 data["trailing_pe"] = 0
             try:
-                data["forward_pe"] =json_data["context"]["dispatcher"]["stores"]["QuoteSummaryStore"]["summaryDetail"]["forwardPE"]["raw"]
+                data["forward_pe"] = json_data["context"]["dispatcher"]["stores"]["QuoteTimeSeriesStore"]["timeSeries"]["trailingForwardPeRatio"][-1]["reportedValue"]["raw"]
             except:
                 data["forward_pe"] = 0
             try:
@@ -366,7 +434,11 @@ def get_yahoo_data(json_data):
             except:
                 data["price"] = 0
             try:
-                data["price_sales"] = json_data["context"]["dispatcher"]["stores"]["QuoteSummaryStore"]["defaultKeyStatistics"]["enterpriseToRevenue"]["raw"]
+                data["price_change"] = 100*json_data["context"]["dispatcher"]["stores"]["QuoteSummaryStore"]["price"]["regularMarketChangePercent"]["raw"]
+            except:
+                data["price_change"] = 0
+            try:
+                data["price_sales"] = json_data["context"]["dispatcher"]["stores"]["QuoteTimeSeriesStore"]["timeSeries"]["trailingPsRatio"][-1]["reportedValue"]["raw"]
             except:
                 data["price_sales"] = 0
             try:
@@ -382,7 +454,7 @@ def get_yahoo_data(json_data):
             except:
                 data["payout_ratio"] = 0
             try:
-                data["enterprise_value"] = json_data["context"]["dispatcher"]["stores"]["QuoteSummaryStore"]["defaultKeyStatistics"]["enterpriseValue"]["raw"]
+                data["enterprise_value"] = json_data["context"]["dispatcher"]["stores"]["QuoteTimeSeriesStore"]["timeSeries"]["trailingEnterpriseValue"][-1]["reportedValue"]["raw"]
             except:
                 data["enterprise_value"] = 0
             try:
@@ -390,11 +462,11 @@ def get_yahoo_data(json_data):
             except:
                 data["debt_equity"] = 0
             try:
-                data["ent_val_ebitda"] = json_data["context"]["dispatcher"]["stores"]["QuoteTimeSeriesStore"]["timeSeries"]["trailingEnterprisesValueEBITDARatio"][0]["reportedValue"]["raw"]
+                data["ent_val_ebitda"] = json_data["context"]["dispatcher"]["stores"]["QuoteTimeSeriesStore"]["timeSeries"]["trailingEnterprisesValueEBITDARatio"][-1]["reportedValue"]["raw"]
             except:
                 data["ent_val_ebitda"] = 0
             try:
-                data["price_book"] = json_data["context"]["dispatcher"]["stores"]["QuoteTimeSeriesStore"]["timeSeries"]["trailingPbRatio"][0]["reportedValue"]["raw"]
+                data["price_book"] = json_data["context"]["dispatcher"]["stores"]["QuoteTimeSeriesStore"]["timeSeries"]["trailingPbRatio"][-1]["reportedValue"]["raw"]
             except:
                 data["price_book"] = 0
             try:
@@ -405,8 +477,10 @@ def get_yahoo_data(json_data):
                 data["trailing_dividend"] = json_data["context"]["dispatcher"]["stores"]["QuoteSummaryStore"]["summaryDetail"]["trailingAnnualDividendYield"]["raw"]
             except:
                 data["trailing_dividend"] = 0
-    pprint(data)
-    a = input()
+            try:
+                data["5Y_dividend"] = json_data["context"]["dispatcher"]["stores"]["QuoteSummaryStore"]["summaryDetail"]["fiveYearAvgDividendYield"]["raw"]
+            except:
+                data["5Y_dividend"] = 0
     return data
 
 
@@ -443,13 +517,13 @@ def get_insider_100(links):
 
 def clean_insider():
     global sh
-    worksheet = sh.get_worksheet(2)
+    worksheet = sh.get_worksheet(1)
     worksheet.clear()
     worksheet.append_row(["X", "Filing Date", "Trade Date", "Ticker", "Insider Name", "Title", "Trade Type", "Price", "Qty", "Owned", "^ Own", "Value", "1d", "1w", "1m", "6m"])
 
 def write_insider(insider_data):
     global sh
-    worksheet = sh.get_worksheet(2)
+    worksheet = sh.get_worksheet(1)
     rows = []
     for key, value in insider_data.items():
         rows.extend(value)
@@ -458,8 +532,13 @@ def write_insider(insider_data):
 
 
 if __name__ == "__main__":
-    # get_all_tickers()
-    # get_insider()
-    # get_tickers_data()
-    a = get_yahoo_data(get_jsons(["https://query2.finance.yahoo.com/v10/finance/quoteSummary/PFE?modules=assetProfile%2CsummaryProfile%2CsummaryDetail%2CesgScores%2Cprice%2CincomeStatementHistory%2CincomeStatementHistoryQuarterly%2CbalanceSheetHistory%2CbalanceSheetHistoryQuarterly%2CcashflowStatementHistory%2CcashflowStatementHistoryQuarterly%2CdefaultKeyStatistics%2CfinancialData%2CcalendarEvents%2CsecFilings%2CrecommendationTrend%2CupgradeDowngradeHistory%2CinstitutionOwnership%2CfundOwnership%2CmajorDirectHolders%2CmajorHoldersBreakdown%2CinsiderTransactions%2CinsiderHolders%2CnetSharePurchaseActivity%2Cearnings%2CearningsHistory%2CearningsTrend%2CindustryTrend%2CindexTrend%2CsectorTrend"])[0])
-    # get_yahoo_data(get_soups(["https://finance.yahoo.com/quote/AAPL/key-statistics?p=AAPL"])[0])
+    choice = int(input("Enter choice: \n1)Get all tickers \n2)Get insider information \n3)Resume dashboard \n4)Refresh dashboard\n"))
+
+    if choice == 1:
+        get_all_tickers()
+    elif choice == 2:
+        get_insider()
+    elif choice == 3:
+        get_tickers_data(choice)
+    elif choice == 4:
+        get_tickers_data(choice)
