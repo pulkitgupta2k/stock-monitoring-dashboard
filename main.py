@@ -15,7 +15,7 @@ from datetime import datetime
 from creds import API_KEY
 
 gc = gspread.service_account("key.json")
-sh = gc.open("Copy of v.03 stock monitoring dashboard")
+sh = gc.open("Stock Monitoring v1.0")
 
 def open_tickers():
     with open("tickers.json") as f:
