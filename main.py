@@ -11,8 +11,10 @@ from pprint import pprint
 from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from datetime import datetime
 from creds import API_KEY
+
 
 gc = gspread.service_account("key.json")
 sh = gc.open("Stock Monitoring v1.0")
@@ -153,9 +155,10 @@ def get_tickers_data(choice):
         clean_dashboard()
         done = set()
     options = Options()
+    ser = Service("./chromedriver")
     options.headless = True
     options.add_argument('--log-level=3')
-    driver = webdriver.Chrome(options=options)
+    driver = webdriver.Chrome(service=ser, options=options)
     for key in tickers.keys():
         if key in done:
             continue
